@@ -1,0 +1,75 @@
+diff --git a/backend/hwcomposer/backend.c b/backend/hwcomposer/backend.c
+index 5d0f115..d103ae9 100644
+--- a/backend/hwcomposer/backend.c
++++ b/backend/hwcomposer/backend.c
+@@ -160,7 +160,7 @@ struct wlr_backend *wlr_hwcomposer_backend_create(struct wl_display *display,
+ 	hwc_backend->display = display;
+ 
+ 	static EGLint config_attribs[] = {
+-		EGL_SURFACE_TYPE, EGL_WINDOW_BIT,
++		EGL_SURFACE_TYPE, EGL_WINDOW_BIT | EGL_PBUFFER_BIT,
+ 		EGL_RENDERABLE_TYPE, EGL_OPENGL_ES2_BIT,
+ 		EGL_RED_SIZE, 8,
+ 		EGL_GREEN_SIZE, 8,
+diff --git a/backend/hwcomposer/output.c b/backend/hwcomposer/output.c
+index a530ee9..cf9ef40 100644
+--- a/backend/hwcomposer/output.c
++++ b/backend/hwcomposer/output.c
+@@ -23,6 +23,7 @@
+ #include "util/time.h"
+ 
+ #include <sys/epoll.h>
++#include <GLES2/gl2.h>
+ #include <sys/timerfd.h>
+ 
+ static void schedule_frame(struct wlr_hwcomposer_output *output) {
+@@ -151,12 +152,11 @@ static bool output_commit(struct wlr_output *wlr_output) {
+ 
+ 	if (wlr_output->pending.committed & WLR_OUTPUT_STATE_BUFFER) {
+ 		pixman_region32_t *damage = NULL;
+-		if (wlr_output->pending.committed & WLR_OUTPUT_STATE_DAMAGE) {
+-			damage = &wlr_output->pending.damage;
+-		}
++		(void)damage; // no partial damage: the MTK hwcomposer handles partial updates badly
+ 
+ 		switch (wlr_output->pending.buffer_type) {
+ 		case WLR_OUTPUT_STATE_BUFFER_RENDER:
++			glFinish(); // wait for the GPU: the hwcomposer gets no fence
+ 			if (!wlr_egl_swap_buffers(&hwc_backend->egl,
+ 					output->egl_surface, damage)) {
+ 				return false;
+diff --git a/render/egl.c b/render/egl.c
+index 9b5e62c..422e103 100644
+--- a/render/egl.c
++++ b/render/egl.c
+@@ -422,6 +422,7 @@ EGLSurface wlr_egl_create_surface(struct wlr_egl *egl, void *window) {
+ }
+ 
+ static int egl_get_buffer_age(struct wlr_egl *egl, EGLSurface surface) {
++	if (!getenv("WLR_M7_BUFFER_AGE")) return -1;
+ 	if (!egl->exts.buffer_age_ext && !egl->exts.partial_update_ext) {
+ 		return -1;
+ 	}
+@@ -439,6 +440,14 @@ static int egl_get_buffer_age(struct wlr_egl *egl, EGLSurface surface) {
+ 
+ bool wlr_egl_make_current(struct wlr_egl *egl, EGLSurface surface,
+ 		int *buffer_age) {
++	static EGLSurface m7_dummy = EGL_NO_SURFACE;
++	if (surface == EGL_NO_SURFACE) {
++		if (m7_dummy == EGL_NO_SURFACE) {
++			const EGLint a[] = { EGL_WIDTH, 1, EGL_HEIGHT, 1, EGL_NONE };
++			m7_dummy = eglCreatePbufferSurface(egl->display, egl->config, a);
++		}
++		surface = m7_dummy;
++	}
+ 	if (!eglMakeCurrent(egl->display, surface, surface, egl->context)) {
+ 		wlr_log(WLR_ERROR, "eglMakeCurrent failed");
+ 		return false;
+@@ -522,6 +531,7 @@ static void transform_damage(EGLDisplay display, EGLSurface surface,
+ 
+ bool wlr_egl_set_damage_region(struct wlr_egl *egl, EGLSurface surface,
+ 		pixman_region32_t *damage) {
++	(void)0; return true; // PowerVR: no damage region (we always redraw everything; buffer age is unknown)
+ 	if (!egl->exts.partial_update_ext || damage == NULL) {
+ 		return true;
+ 	}

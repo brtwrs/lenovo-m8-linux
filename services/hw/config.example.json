@@ -1,0 +1,11 @@
+{
+  "mqtt": {"host": "192.168.1.10", "port": 1883, "user": "tablet", "pass": "change-me"},
+  "id": "m8",
+  "name": "Tablet M8",
+  "model": "Lenovo Tab M8 (TB300FU)",
+  "standby_after": 300,
+  "standby_mode": "black",
+  "pulse_server": "unix:/run/m7pulse/native",
+  "pulse_sink": "m7",
+  "pulse_user": null
+}

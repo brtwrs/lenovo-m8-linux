@@ -1,0 +1,6 @@
+id=m8linux
+name=m8linux
+version=1
+versionCode=1
+author=Bart Wijers
+description=Boots Debian instead of the Android UI (see /data/adb/m8linux/linux-vast). Hold Volume UP during boot for one Android boot.

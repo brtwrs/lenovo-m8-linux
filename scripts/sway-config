@@ -1,0 +1,11 @@
+# ~/.config/sway/config for a wall tablet (Tab M8, landscape). Sway listens on /tmp/xdg/wayland-1.
+output * transform 90 bg #000000 solid_color
+# Sway already rotates touch with the output: NO extra calibration matrix (an extra one makes taps land 180° off).
+input type:touch {
+    map_to_output HWCOMPOSER-1
+    calibration_matrix 1 0 0 0 1 0
+}
+default_border none
+# your app, fullscreen (replace app_id and the command)
+for_window [app_id="your-app"] fullscreen enable
+exec /root/app-start.sh
