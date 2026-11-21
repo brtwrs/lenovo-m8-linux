@@ -16,9 +16,12 @@ for i in $(seq 90); do service check media.audio_policy | grep -q found && break
 echo "audio_policy after ${i}s"; sleep 2
 
 # Sound: only the music stream volume (initialising every stream made the MTK HAL hang), then PulseAudio's
-# null-sink monitor (unix socket inside the chroot) through audioserver.
-./m7audio volume $(cat $D/volume 2>/dev/null || echo 13)
-( while true; do ./m7audio play /data/linux/run/m7pulse/pcm </dev/null >>$D/m7audio.log 2>&1; echo "$(date +%T) m7audio stopped"; sleep 3; done ) &
+# null-sink monitor (unix socket inside the chroot) through audioserver. Don't record while playing on the M8:
+# after a volume change the MTK HAL can hang on the next recording, and audioserver aborts and restarts.
+VOL=$(cat $D/volume 2>/dev/null || echo 13)
+./m7audio volume $VOL
+# the volume goes along: m7audio sets it again whenever it opens the speaker (audioserver restarts forget it)
+( while true; do ./m7audio play /data/linux/run/m7pulse/pcm $VOL </dev/null >>$D/m7audio.log 2>&1; echo "$(date +%T) m7audio stopped"; sleep 3; done ) &
 
 # Camera: Android's own cameraserver works with fakeperm, but refuses clients until it has been told that user 0
 # is active (system_server normally does that): ICameraService.notifySystemEvent(EVENT_USER_SWITCHED=1, [0]),

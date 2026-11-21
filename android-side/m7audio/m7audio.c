@@ -1,9 +1,12 @@
 /* m7audio: sound for the Lenovo Tab M7 in Linux mode, through Android's audioserver (AAudio, NDK).
  *
  *   m7audio volume <0-15>    set the stream volumes (without system_server they sit at -inf)
- *   m7audio play <socket>    read S16LE stereo 48 kHz from PulseAudio's simple-protocol unix socket and play
+ *   m7audio play <socket> [volume]
+ *                            read S16LE stereo 48 kHz from PulseAudio's simple-protocol unix socket and play
  *                            it; the output stream (and the amplifier) only opens on non-silent audio and
- *                            closes again after 3 s of silence
+ *                            closes again after 3 s of silence. With a volume (0-15) it sets the stream volume
+ *                            again every time it opens the speaker: if audioserver restarts, the volumes are
+ *                            back at -inf, and nothing else would notice
  *   m7audio selftest         play 880 Hz while recording with the built-in microphone; print the tone level
  *   m7audio measure <s>      record for <s> seconds and print the 880 Hz level (start it before the playback)
  *
@@ -88,7 +91,9 @@ static int silent(const int16_t *x, size_t n) {
     return 1;
 }
 
-static int play(const char *path) {
+static int set_volume(int index);
+
+static int play(const char *path, int volume) {
     int16_t buf[BLOCK * 2]; AAudioStream *out = NULL; int quiet_blocks = 0;
     for (;;) {
         int fd = socket(AF_UNIX, SOCK_STREAM, 0);
@@ -106,7 +111,10 @@ static int play(const char *path) {
             if (silent(buf, frames * 2)) {
                 if (out && ++quiet_blocks > 3 * RATE / BLOCK) { AAudioStream_requestStop(out); AAudioStream_close(out); out = NULL; fprintf(stderr, "silence: speaker closed\n"); }
             } else quiet_blocks = 0;
-            if (!out && !quiet_blocks) { out = open_stream(0, 2); if (out) AAudioStream_requestStart(out); }
+            if (!out && !quiet_blocks) {
+                if (volume >= 0) set_volume(volume);
+                out = open_stream(0, 2); if (out) AAudioStream_requestStart(out);
+            }
             if (out && AAudioStream_write(out, buf, frames, 1000000000LL) < 0) { AAudioStream_close(out); out = NULL; }
             memmove(buf, (char *)buf + frames * 4, fill - frames * 4); fill -= frames * 4;
         }
@@ -139,7 +147,7 @@ static int set_volume(int index) {
 int main(int argc, char **argv) {
     start_binder_threads();
     if (argc > 2 && !strcmp(argv[1], "volume")) return set_volume(atoi(argv[2]));
-    if (argc > 2 && !strcmp(argv[1], "play")) return play(argv[2]);
+    if (argc > 2 && !strcmp(argv[1], "play")) return play(argv[2], argc > 3 ? atoi(argv[3]) : -1);
     if (argc > 1 && !strcmp(argv[1], "selftest")) return selftest();
     if (argc > 2 && !strcmp(argv[1], "measure")) return measure(atoi(argv[2]));
     fprintf(stderr, "usage: m7audio volume <0-15> | play <socket> | selftest | measure <seconds>\n");

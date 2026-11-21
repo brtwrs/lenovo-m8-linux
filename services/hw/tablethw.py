@@ -248,19 +248,30 @@ class Hw:
             self.publish(k, v)
 
     def on_message(self, c, u, m):
-        t = m.topic[len(BASE) + 1:]
+        # MQTT is a network input: validate it, and never let a bad message kill the MQTT thread
         try:
-            p = json.loads(m.payload or b"{}")
-        except ValueError:
-            p = {"state": m.payload.decode(errors="ignore")}
-        if t == "screen/set":
-            self.set_screen(p.get("state", "ON") == "ON", p.get("brightness"), "ha")
-        elif t in ("led_red/set", "led_green/set"):
-            colour = t.split("/")[0][4:]
-            effect = p.get("effect", self.leds[colour]["effect"])
-            self.set_led(colour, p.get("state", "ON") == "ON", None if effect == "solid" else effect)
-        elif t == "vibrate/press":
-            self.vibrate(200)
+            t = m.topic[len(BASE) + 1:]
+            try:
+                p = json.loads(m.payload or b"{}")
+            except ValueError:
+                p = {"state": m.payload.decode(errors="ignore")[:16]}
+            if not isinstance(p, dict):
+                return                                  # not a JSON object: ignore
+            state_on = str(p.get("state", "ON")).upper() == "ON"
+            if t == "screen/set":
+                b = p.get("brightness")
+                b = int(b) if isinstance(b, (int, float)) and not isinstance(b, bool) and 0 <= b <= 255 else None
+                self.set_screen(state_on, b, "ha")
+            elif t in ("led_red/set", "led_green/set") and HAS_LEDS:
+                colour = t.split("/")[0][4:]
+                effect = p.get("effect", self.leds[colour]["effect"])
+                if effect not in (None, "solid", "blink", "fast"):
+                    effect = None
+                self.set_led(colour, state_on, None if effect == "solid" else effect)
+            elif t == "vibrate/press":
+                self.vibrate(200)
+        except Exception as e:
+            print("mqtt message ignored:", repr(e), flush=True)
 
     def start_mqtt(self):
         m = CFG["mqtt"]

@@ -19,7 +19,9 @@
  * A service that already exists (e.g. on a normal Android boot) is skipped.
  *
  * Only run this in Linux mode: the Android UI and its apps are stopped there, and the only clients are your own
- * root processes. It grants everything.
+ * root processes. Even so it only grants system uids: checkPermission answers "granted" only when the uid being
+ * checked is below FIRST_APPLICATION_UID (10000), and every service only answers callers below 10000
+ * (root, system, media, audioserver, cameraserver ...). App uids get "denied".
  *
  * Uses libbinder_ndk only (stable across Android versions). The service-manager and thread-pool calls are
  * not in the NDK's link stubs, so they are looked up at runtime; libbinder_ndk exports them since Android 10.
@@ -32,8 +34,18 @@
 #include <stdio.h>
 #include <string.h>
 
-/* IPermissionController.aidl */
+/* IPermissionController.aidl: checkPermission(String permission, int pid, int uid) */
 enum { CHECK_PERMISSION = FIRST_CALL_TRANSACTION, NOTE_OP };
+#define FIRST_APPLICATION_UID 10000
+
+static bool system_caller(void) { return AIBinder_getCallingUid() < FIRST_APPLICATION_UID; }
+
+static bool skip_string(void *data, int32_t length, char **buffer) {
+    static char scratch[512];
+    if (length < 0 || length > (int32_t)sizeof scratch) return false;
+    *buffer = scratch;
+    return true;
+}
 
 static void *on_create(void *args) { return args; }
 static void on_destroy(void *data) {}
@@ -46,13 +58,21 @@ static binder_status_t reply_ok(AParcel *out) {
 }
 
 static binder_status_t permission_transact(AIBinder *b, transaction_code_t code, const AParcel *in, AParcel *out) {
+    if (!system_caller()) return STATUS_PERMISSION_DENIED;
+    if (code == CHECK_PERMISSION) {
+        int32_t pid = 0, uid = -1;
+        if (AParcel_readString(in, NULL, skip_string) != STATUS_OK || AParcel_readInt32(in, &pid) != STATUS_OK ||
+            AParcel_readInt32(in, &uid) != STATUS_OK) return STATUS_BAD_VALUE;
+        reply_ok(out);
+        return AParcel_writeBool(out, uid >= 0 && uid < FIRST_APPLICATION_UID);   /* granted only for system uids */
+    }
     reply_ok(out);
-    if (code == CHECK_PERMISSION) return AParcel_writeBool(out, true);   /* granted */
     return AParcel_writeInt32(out, 0);                                    /* noteOp: MODE_ALLOWED; others: 0 */
 }
 
 /* everything else: success, followed by a zero (false, MODE_ALLOWED, null parcelable, empty array) */
 static binder_status_t neutral_transact(AIBinder *b, transaction_code_t code, const AParcel *in, AParcel *out) {
+    if (!system_caller()) return STATUS_PERMISSION_DENIED;
     reply_ok(out);
     return AParcel_writeInt32(out, 0);
 }
@@ -62,6 +82,7 @@ static binder_status_t neutral_transact(AIBinder *b, transaction_code_t code, co
 enum { GET_PROCESS_STATES_FROM_PIDS = FIRST_CALL_TRANSACTION, GET_PROCESS_STATES_AND_OOM_SCORES_FROM_PIDS };
 #define PROCESS_STATE_TOP 2
 static binder_status_t processinfo_transact(AIBinder *b, transaction_code_t code, const AParcel *in, AParcel *out) {
+    if (!system_caller()) return STATUS_PERMISSION_DENIED;
     int32_t n = 0;
     if (AParcel_readInt32(in, &n) != STATUS_OK || n < 0 || n > 4096) return STATUS_BAD_VALUE;
     reply_ok(out);
