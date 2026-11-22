@@ -4,7 +4,8 @@ Run a real Debian 12 (arm64) on the Lenovo Tab M8 4th gen (TB300FU, MediaTek MT8
 3 GB RAM, Android 12), with wifi, touch, a **GPU-accelerated Wayland compositor (Sway)**, sound, cameras and sensors,
 so it can drive a smooth wall dashboard without the Android UI.
 
-Like its sibling project [lenovo-m7-linux](https://github.com/brtwrs/lenovo-m7-linux), this is not a mainline port.
+Like its sibling projects [lenovo-m7-linux](https://github.com/brtwrs/lenovo-m7-linux) and
+[lenovo-m11-linux](https://github.com/brtwrs/lenovo-m11-linux) (same setup on Android 13 with a Mali GPU), this is not a mainline port.
 The stock Lenovo kernel (4.19) and Android's vendor services keep running, and Debian runs next to them in a chroot
 that takes over the screen. The GPU is used through [libhybris](https://github.com/libhybris/libhybris) and Android's
 own hwcomposer, the way Halium/Droidian phones do it. Camera, sound and sensors stay Android things too: small NDK

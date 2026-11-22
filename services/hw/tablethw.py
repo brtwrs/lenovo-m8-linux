@@ -44,7 +44,7 @@ BASE = f"tablethw/{ID}"
 LEDS = "/sys/class/leds/"
 HAS_LEDS = os.path.exists(LEDS + "red") and os.path.exists(LEDS + "green")
 BUTTON_DEVICES = ("mtk-kpd", "mtk-pmic-keys")
-TOUCH_DEVICES = ("fts_ts", "mtk-tpd")       # prefer fts_ts: the M8 also has an mtk-tpd device that never reports
+TOUCH_DEVICES = ("fts_ts", "himax-touchscreen", "mtk-tpd")   # prefer fts_ts: the M8 also has an mtk-tpd that never reports; M11 = Himax
 STATE_FILE = os.path.join(HERE, "state.json")
 SENSOR_PIPE = "/run/m7sensors/stream"
 
@@ -423,16 +423,17 @@ class Hw:
                     self.set_screen(self.standby, None, "power button")
 
     def touch_loop(self, name):
-        # mtk-tpd reports BTN_TOUCH; fts_ts only ABS_MT_TRACKING_ID (>= 0 = finger down, -1 = lifted)
+        # mtk-tpd reports BTN_TOUCH; fts_ts (M8) and Himax (M11) only ABS_MT_TRACKING_ID (>= 0 = finger down, -1 = lifted)
         self.touch = next(evdev.InputDevice(p) for p in evdev.list_devices() if evdev.InputDevice(p).name == name)
         if self.standby:
             self.grab_touch(True)
         fingers = 0
+        has_btn = evdev.ecodes.BTN_TOUCH in self.touch.capabilities().get(evdev.ecodes.EV_KEY, [])
         for e in self.touch.read_loop():
             self.last_activity = time.time()
             if e.type == evdev.ecodes.EV_KEY and e.code == evdev.ecodes.BTN_TOUCH:
                 pressed, released = e.value == 1, e.value == 0
-            elif e.type == evdev.ecodes.EV_ABS and e.code == evdev.ecodes.ABS_MT_TRACKING_ID and name == "fts_ts":
+            elif e.type == evdev.ecodes.EV_ABS and e.code == evdev.ecodes.ABS_MT_TRACKING_ID and not has_btn:
                 fingers = max(0, fingers + (1 if e.value >= 0 else -1))
                 pressed, released = e.value >= 0, e.value < 0 and fingers == 0
             else:
