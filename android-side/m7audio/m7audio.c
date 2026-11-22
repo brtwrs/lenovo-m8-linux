@@ -14,6 +14,8 @@
  */
 #include <aaudio/AAudio.h>
 #include <dlfcn.h>
+#include <fcntl.h>
+#include <signal.h>
 #include <math.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -93,6 +95,27 @@ static int silent(const int16_t *x, size_t n) {
 
 static int set_volume(int index);
 
+/* Microphone -> FIFO (PulseAudio's module-pipe-source in the chroot reads it as a normal source).
+ * Mono, 16-bit, 48 kHz. Reopens the microphone when audioserver restarts or the reader goes away. */
+static int mic(const char *path) {
+    int16_t buf[BLOCK];
+    signal(SIGPIPE, SIG_IGN);
+    for (;;) {
+        int fd = open(path, O_WRONLY | O_CLOEXEC);
+        if (fd < 0) { sleep(2); continue; }
+        AAudioStream *in = open_stream(1, 1);
+        if (!in) { close(fd); sleep(5); continue; }
+        AAudioStream_requestStart(in);
+        fprintf(stderr, "microphone -> %s\n", path);
+        for (;;) {
+            aaudio_result_t r = AAudioStream_read(in, buf, BLOCK, 1000000000LL);
+            if (r < 0) { fprintf(stderr, "microphone: %s\n", AAudio_convertResultToText(r)); break; }
+            if (r > 0 && write(fd, buf, (size_t)r * 2) < 0) { fprintf(stderr, "microphone: reader gone\n"); break; }
+        }
+        AAudioStream_requestStop(in); AAudioStream_close(in); close(fd); sleep(1);
+    }
+}
+
 static int play(const char *path, int volume) {
     int16_t buf[BLOCK * 2]; AAudioStream *out = NULL; int quiet_blocks = 0;
     for (;;) {
@@ -148,8 +171,9 @@ int main(int argc, char **argv) {
     start_binder_threads();
     if (argc > 2 && !strcmp(argv[1], "volume")) return set_volume(atoi(argv[2]));
     if (argc > 2 && !strcmp(argv[1], "play")) return play(argv[2], argc > 3 ? atoi(argv[3]) : -1);
+    if (argc > 2 && !strcmp(argv[1], "mic")) return mic(argv[2]);
     if (argc > 1 && !strcmp(argv[1], "selftest")) return selftest();
     if (argc > 2 && !strcmp(argv[1], "measure")) return measure(atoi(argv[2]));
-    fprintf(stderr, "usage: m7audio volume <0-15> | play <socket> | selftest | measure <seconds>\n");
+    fprintf(stderr, "usage: m7audio volume <0-15> | play <socket> | mic <fifo> | selftest | measure <seconds>\n");
     return 2;
 }

@@ -6,3 +6,7 @@ load-module module-null-sink sink_name=m7 rate=48000 channels=2 format=s16le sin
 set-default-sink m7
 load-module module-native-protocol-unix auth-anonymous=1 socket=/run/m7pulse/native
 load-module module-simple-protocol-unix source=m7.monitor record=true playback=false socket=/run/m7pulse/pcm rate=48000 format=s16le channels=2
+# Microphone (optional): `m7audio mic /data/linux/run/m7pulse/mic` on the Android side writes mono 48 kHz
+# into this FIFO; PulseAudio turns it into a normal source.
+load-module module-pipe-source source_name=mic file=/run/m7pulse/mic format=s16le rate=48000 channels=1 source_properties=device.description=Microphone
+set-default-source mic
