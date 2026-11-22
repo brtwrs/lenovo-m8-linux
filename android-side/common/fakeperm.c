@@ -16,6 +16,11 @@
  *                       MediaCodec::configure waits for it on Android 12 (format shaper), so no encoder without it.
  *   processinfo         android.os.IProcessInfoService  every pid: PROCESS_STATE_TOP, oom score 0. CameraService
  *                       asks this before every connect; without an answer of the right length it refuses.
+ *   media.camera.proxy  android.hardware.ICameraServiceProxy  every call -> 0. Android 13's CameraService asks it
+ *                       isCameraDisabled(user) on every connect and treats "no proxy" as disabled (-10012).
+ *   SurfaceFlinger      android.ui.ISurfaceComposer  every call -> 0 (no display-event connection). Android 13's
+ *                       Camera3OutputStream creates a DisplayEventReceiver and waits forever for SurfaceFlinger,
+ *                       which is stopped in Linux mode (the compositor owns the display). Not on a normal boot.
  * A service that already exists (e.g. on a normal Android boot) is skipped.
  *
  * Only run this in Linux mode: the Android UI and its apps are stopped there, and the only clients are your own
@@ -104,6 +109,8 @@ static const struct { const char *name, *descriptor; AIBinder_Class_onTransact f
     { "scheduling_policy",  "android.os.ISchedulingPolicyService",   neutral_transact },
     { "package_native",     "android.content.pm.IPackageManagerNative", neutral_transact },
     { "processinfo",        "android.os.IProcessInfoService",        processinfo_transact },
+    { "media.camera.proxy", "android.hardware.ICameraServiceProxy",  neutral_transact },
+    { "SurfaceFlinger",     "android.ui.ISurfaceComposer",           neutral_transact },
 };
 
 int main(void) {
