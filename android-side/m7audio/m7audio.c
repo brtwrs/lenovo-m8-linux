@@ -14,6 +14,7 @@
  */
 #include <aaudio/AAudio.h>
 #include <dlfcn.h>
+#include <errno.h>
 #include <fcntl.h>
 #include <signal.h>
 #include <math.h>
@@ -23,6 +24,7 @@
 #include <sys/socket.h>
 #include <sys/un.h>
 #include <unistd.h>
+#include <time.h>
 
 #define RATE 48000
 #define BLOCK 960
@@ -38,11 +40,40 @@ static AAudioStream *open_stream(int input, int channels) {
     AAudioStreamBuilder_setFormat(b, AAUDIO_FORMAT_PCM_I16);
     AAudioStreamBuilder_setSharingMode(b, AAUDIO_SHARING_MODE_SHARED);
     AAudioStreamBuilder_setPerformanceMode(b, AAUDIO_PERFORMANCE_MODE_NONE);
+    /* For experiments: M7AUDIO_PRESET=<input preset>, M7AUDIO_USAGE=<usage> (+ M7AUDIO_CONTENT). Default: platform defaults. */
+    if (input) {
+        if (getenv("M7AUDIO_PRESET")) AAudioStreamBuilder_setInputPreset(b, atoi(getenv("M7AUDIO_PRESET")));
+    } else if (getenv("M7AUDIO_USAGE")) {
+        AAudioStreamBuilder_setUsage(b, atoi(getenv("M7AUDIO_USAGE")));
+        if (getenv("M7AUDIO_CONTENT")) AAudioStreamBuilder_setContentType(b, atoi(getenv("M7AUDIO_CONTENT")));
+    }
     aaudio_result_t r = AAudioStreamBuilder_openStream(b, &s);
     AAudioStreamBuilder_delete(b);
     if (r != AAUDIO_OK) { fprintf(stderr, "open %s: %s\n", input ? "microphone" : "speaker", AAudio_convertResultToText(r)); return NULL; }
-    fprintf(stderr, "%s: %d Hz, %d channels\n", input ? "microphone" : "speaker", AAudioStream_getSampleRate(s), AAudioStream_getChannelCount(s));
+    /* Low latency without the MMAP path: a blocking write waits until fewer than bufferSize frames are queued, so keep
+     * bufferSize small (two bursts) instead of the default (the whole capacity, which can be seconds). */
+    int burst = AAudioStream_getFramesPerBurst(s);
+    if (!input && burst > 0) AAudioStream_setBufferSizeInFrames(s, burst * 2 > 960 ? burst * 2 : 960);
+    fprintf(stderr, "%s: %d Hz, %d channels, burst %d, buffer %d of %d frames\n", input ? "microphone" : "speaker",
+            AAudioStream_getSampleRate(s), AAudioStream_getChannelCount(s), burst,
+            AAudioStream_getBufferSizeInFrames(s), AAudioStream_getBufferCapacityInFrames(s));
     return s;
+}
+
+/* Latency report (every 5 s, only with M7AUDIO_LATENCY set): frames handed over vs frames the hardware has played
+ * or captured according to AAudio's timestamp. */
+static void report_latency(AAudioStream *s, const char *what, int64_t *last) {
+    if (!getenv("M7AUDIO_LATENCY")) return;
+    struct timespec now; clock_gettime(CLOCK_MONOTONIC, &now);
+    int64_t t = now.tv_sec * 1000000000LL + now.tv_nsec;
+    if (t - *last < 5000000000LL) return;
+    *last = t;
+    int64_t pos = 0, when = 0;
+    if (AAudioStream_getTimestamp(s, CLOCK_MONOTONIC, &pos, &when) != AAUDIO_OK) { fprintf(stderr, "%s: no timestamp\n", what); return; }
+    int64_t mine = AAudioStream_getDirection(s) == AAUDIO_DIRECTION_OUTPUT ? AAudioStream_getFramesWritten(s) : AAudioStream_getFramesRead(s);
+    double ms = (AAudioStream_getDirection(s) == AAUDIO_DIRECTION_OUTPUT ? (double)(mine - pos) : (double)(pos - mine)) * 1000.0 / RATE
+                + (t - when) / 1e6 * (AAudioStream_getDirection(s) == AAUDIO_DIRECTION_OUTPUT ? -1 : 1);
+    fprintf(stderr, "%s latency ~%.0f ms (mine %lld, hw %lld)\n", what, ms, (long long)mine, (long long)pos);
 }
 
 /* Goertzel at 880 Hz, plus RMS */
@@ -103,21 +134,34 @@ static int mic(const char *path) {
     for (;;) {
         int fd = open(path, O_WRONLY | O_CLOEXEC);
         if (fd < 0) { sleep(2); continue; }
-        AAudioStream *in = open_stream(1, 1);
+        /* Keep the microphone live. PulseAudio's pipe-source reads at its own clock, never faster, so any backlog stays
+         * forever: in this FIFO (64 KiB = 0.68 s) and, if our write blocks, in audioserver's capture buffer (seconds).
+         * So: empty the FIFO, shrink it to one page (~40 ms), and write without blocking (full = drop this block;
+         * 1920-byte blocks are below PIPE_BUF, so a write is all or nothing). */
+        int rfd = open(path, O_RDONLY | O_NONBLOCK | O_CLOEXEC);
+        if (rfd >= 0) { char weg[4096]; while (read(rfd, weg, sizeof weg) > 0) ; }
+        fcntl(fd, F_SETPIPE_SZ, 4096);
+        if (rfd >= 0) close(rfd);
+        fcntl(fd, F_SETFL, fcntl(fd, F_GETFL) | O_NONBLOCK);
+        AAudioStream *in = open_stream(1, 1); int64_t last = 0;
         if (!in) { close(fd); sleep(5); continue; }
         AAudioStream_requestStart(in);
         fprintf(stderr, "microphone -> %s\n", path);
         for (;;) {
             aaudio_result_t r = AAudioStream_read(in, buf, BLOCK, 1000000000LL);
+            report_latency(in, "microphone", &last);
             if (r < 0) { fprintf(stderr, "microphone: %s\n", AAudio_convertResultToText(r)); break; }
-            if (r > 0 && write(fd, buf, (size_t)r * 2) < 0) { fprintf(stderr, "microphone: reader gone\n"); break; }
+            if (r > 0 && write(fd, buf, (size_t)r * 2) < 0) {
+                if (errno == EAGAIN) continue;                     /* FIFO full: drop, stay live */
+                fprintf(stderr, "microphone: reader gone\n"); break;
+            }
         }
         AAudioStream_requestStop(in); AAudioStream_close(in); close(fd); sleep(1);
     }
 }
 
 static int play(const char *path, int volume) {
-    int16_t buf[BLOCK * 2]; AAudioStream *out = NULL; int quiet_blocks = 0;
+    int16_t buf[BLOCK * 2]; AAudioStream *out = NULL; int quiet_blocks = 0; int64_t last_out = 0;
     for (;;) {
         int fd = socket(AF_UNIX, SOCK_STREAM, 0);
         struct sockaddr_un a = { .sun_family = AF_UNIX };
@@ -139,6 +183,7 @@ static int play(const char *path, int volume) {
                 out = open_stream(0, 2); if (out) AAudioStream_requestStart(out);
             }
             if (out && AAudioStream_write(out, buf, frames, 1000000000LL) < 0) { AAudioStream_close(out); out = NULL; }
+            if (out) report_latency(out, "speaker", &last_out);
             memmove(buf, (char *)buf + frames * 4, fill - frames * 4); fill -= frames * 4;
         }
         close(fd);
