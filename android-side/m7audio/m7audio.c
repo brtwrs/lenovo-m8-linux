@@ -21,6 +21,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/ioctl.h>
 #include <sys/socket.h>
 #include <sys/un.h>
 #include <unistd.h>
@@ -170,20 +171,43 @@ static int play(const char *path, int volume) {
         fprintf(stderr, "connected to %s\n", path);
         size_t fill = 0;
         for (;;) {
+            /* Stay live: PulseAudio and the speaker both run in real time, so a backlog in this socket (seconds on the
+             * Tab M11) never shrinks by itself. More than 150 ms waiting: throw away the oldest, keep 50 ms. */
+            int q = 0;
+            if (ioctl(fd, FIONREAD, &q) == 0 && q > RATE * 4 * 15 / 100) {
+                size_t drop = (size_t)(q - RATE * 4 * 5 / 100) & ~(size_t)3; char trash[8192];
+                if (!fill) {
+                    while (drop) { ssize_t d = recv(fd, trash, drop > sizeof trash ? sizeof trash : drop, 0); if (d <= 0) break; drop -= (size_t)d; }
+                    static int64_t last_drop = 0; struct timespec nd; clock_gettime(CLOCK_MONOTONIC, &nd);
+                    int64_t td = nd.tv_sec * 1000LL + nd.tv_nsec / 1000000;
+                    if (td - last_drop > 60000) { last_drop = td; fprintf(stderr, "backlog %.2f s dropped\n", q / (double)(RATE * 4)); }
+                }
+            }
             ssize_t k = recv(fd, (char *)buf + fill, sizeof buf - fill, 0);
             if (k <= 0) break;
             fill += k;
             size_t frames = fill / 4;
             if (!frames) continue;
             if (silent(buf, frames * 2)) {
-                if (out && ++quiet_blocks > 3 * RATE / BLOCK) { AAudioStream_requestStop(out); AAudioStream_close(out); out = NULL; fprintf(stderr, "silence: speaker closed\n"); }
+                /* M7AUDIO_KEEP_OPEN=1: never close (some HALs, e.g. Tab M11, need seconds to come out of standby) */
+                if (out && ++quiet_blocks > 3 * RATE / BLOCK && !getenv("M7AUDIO_KEEP_OPEN")) { AAudioStream_requestStop(out); AAudioStream_close(out); out = NULL; fprintf(stderr, "silence: speaker closed\n"); }
             } else quiet_blocks = 0;
             if (!out && !quiet_blocks) {
                 if (volume >= 0) set_volume(volume);
+                struct timespec t0, t1; clock_gettime(CLOCK_MONOTONIC, &t0);
                 out = open_stream(0, 2); if (out) AAudioStream_requestStart(out);
+                clock_gettime(CLOCK_MONOTONIC, &t1);
+                fprintf(stderr, "speaker open+start: %lld ms\n", (long long)((t1.tv_sec - t0.tv_sec) * 1000 + (t1.tv_nsec - t0.tv_nsec) / 1000000));
             }
             if (out && AAudioStream_write(out, buf, frames, 1000000000LL) < 0) { AAudioStream_close(out); out = NULL; }
             if (out) report_latency(out, "speaker", &last_out);
+            {   /* backlog in the socket from PulseAudio: log it when it exceeds half a second (every 5 s at most) */
+                static int64_t last_q = 0; struct timespec nq; clock_gettime(CLOCK_MONOTONIC, &nq);
+                int64_t tq = nq.tv_sec * 1000LL + nq.tv_nsec / 1000000; int q = 0;
+                if (tq - last_q > 5000 && ioctl(fd, FIONREAD, &q) == 0 && q > RATE * 4 / 2) {
+                    last_q = tq; fprintf(stderr, "socket backlog %.1f s (speaker %s)\n", q / (double)(RATE * 4), out ? "open" : "closed");
+                }
+            }
             memmove(buf, (char *)buf + frames * 4, fill - frames * 4); fill -= frames * 4;
         }
         close(fd);
